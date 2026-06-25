@@ -17,5 +17,5 @@ device: "cuda"
 
 # Path
 tokenizer_path: "tokenizer/tokenizer.model"
-data_path: "dataset/samples/corpus_v0.1.txt"
+data_path: "dataset/corpus/data.txt"
 train_split: 0.9
