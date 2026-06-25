@@ -1,4 +1,4 @@
-# SentinelLM v0.1
+# SentinelLM v0.2
 
 Proyek riset untuk mempelajari implementasi Transformer decoder-only dari nol menggunakan PyTorch murni. Tidak menggunakan framework training siap pakai seperti HuggingFace Trainer, PyTorch Lightning, DeepSpeed, atau Megatron.
 
@@ -9,16 +9,15 @@ Proyek riset untuk mempelajari implementasi Transformer decoder-only dari nol me
 - Tokenizer: **SentencePiece (BPE)**
 
 ## Struktur Proyek
-- `config/`: Berisi `configs.py` untuk parameter model.
-- `dataset/`: 
-  - `builder.py`: Menghasilkan dataset dummy (HTTP logs & Python code).
-  - `preprocess.py`: Mengubah teks ke tensor.
-  - `loader.py`: Menghasilkan `{"input_ids": ..., "target_ids": ...}`.
+- `config/`: Konfigurasi arsitektur YAML (contoh: `tiny.yaml`).
+- `dataset/`: Modul dataset multi-kategori (Curriculum Learning) dan skrip preprocessing.
+- `evaluation/`: The Validation Suite (Perplexity, Next-Token Accuracy, Generation, Attention Heatmap).
 - `model/`: Implementasi komponen Transformer murni secara modular.
 - `tokenizer/`: Membangun *vocab* menggunakan SentencePiece.
-- `training/`: Implementasi loop PyTorch murni, AdamW, loss, dan LR scheduler.
+- `training/`: Implementasi Kaggle-Resilient Trainer, AdamW, loss, dan Cosine LR scheduler.
 - `inference/`: Proses autoregresif untuk text generation.
-- `utils/`: Logging dan seed.
+- `tools/`: The Corpus Inspector (Auditing data, Deduplikasi, Analisis Security Coverage).
+- `utils/`: Logging dan konfigurasi environment.
 
 ## Cara Penggunaan
 
