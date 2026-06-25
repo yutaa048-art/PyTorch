@@ -36,14 +36,14 @@ class SentinelLM(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
-        # Precompute RoPE frequencies
-        freqs_cis = precompute_freqs_cis(
+        # Precompute RoPE frequencies (sebagai real tensor untuk keamanan DataParallel)
+        freqs = precompute_freqs_cis(
             config.hidden_size // config.num_attention_heads,
             config.max_position_embeddings * 2, # Buffer ukuran
             theta=config.rope_theta
         )
         # Register sebagai buffer agar tidak ikut diperbarui (tidak perlu backprop)
-        self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+        self.register_buffer("freqs", freqs, persistent=False)
         
     def forward(self, tokens: torch.Tensor, output_attentions: bool = False):
         # tokens: [batch_size, seq_len]
@@ -51,8 +51,9 @@ class SentinelLM(nn.Module):
         
         h = self.tok_embeddings(tokens)
         
-        # Ambil precomputed frequencies sepanjang seq_len
-        freqs_cis = self.freqs_cis[:seq_len]
+        # Ambil precomputed frequencies sepanjang seq_len dan konversi ke complex di device masing-masing
+        freqs = self.freqs[:seq_len]
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
         
         all_attentions = []
         for layer in self.layers:

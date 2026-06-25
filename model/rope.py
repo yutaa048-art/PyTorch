@@ -9,9 +9,8 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Te
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
     freqs = torch.outer(t, freqs)
-    # Ubah ke representasi polar (complex numbers)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-    return freqs_cis
+    # Kembalikan freqs (real) untuk menghindari bug DataParallel pada complex tensor
+    return freqs
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
@@ -19,7 +18,8 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
     """
     ndim = x.ndim
     assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    if freqs_cis.shape != (x.shape[1], x.shape[-1]):
+        raise ValueError(f"Shape mismatch in RoPE: freqs_cis={freqs_cis.shape}, expected=({x.shape[1]}, {x.shape[-1]}), x.shape={x.shape}")
     
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
