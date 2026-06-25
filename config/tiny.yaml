@@ -1,0 +1,21 @@
+# Arsitektur Transformer
+vocab_size: 1000  # Cukup kecil untuk testing jalan
+hidden_size: 64
+num_hidden_layers: 2
+num_attention_heads: 4
+intermediate_size: 172
+max_position_embeddings: 128
+rms_norm_eps: 1.0e-6
+rope_theta: 10000.0
+
+# Training
+batch_size: 8
+learning_rate: 3.0e-4
+weight_decay: 0.01
+max_epochs: 2
+device: "cuda"
+
+# Path (berdasarkan root folder)
+tokenizer_path: "tokenizer/tokenizer_tiny.model"
+data_path: "dataset/samples/corpus_v0.1.txt"
+train_split: 0.9

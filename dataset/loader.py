@@ -1,0 +1,71 @@
+import os
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.config import load_config
+from utils.logger import get_logger
+
+logger = get_logger("Loader")
+
+class SentinelDataset(Dataset):
+    def __init__(self, data_tensor: torch.Tensor, seq_len: int):
+        self.data = data_tensor
+        self.seq_len = seq_len
+        
+    def __len__(self):
+        return len(self.data) - self.seq_len
+        
+    def __getitem__(self, idx):
+        x = self.data[idx : idx + self.seq_len]
+        y = self.data[idx + 1 : idx + self.seq_len + 1]
+        
+        return {
+            "input_ids": x,
+            "target_ids": y
+        }
+
+def get_dataloaders(config):
+    base_dir = os.path.dirname(config.data_path)
+    categories = getattr(config, "data_category", "all")
+    
+    if categories == "all":
+        categories_list = ["code", "docs", "security", "writeups"]
+    else:
+        categories_list = [categories]
+        
+    train_tensors = []
+    val_tensors = []
+    
+    for cat in categories_list:
+        train_path = os.path.join(base_dir, cat, "train.pt")
+        val_path = os.path.join(base_dir, cat, "val.pt")
+        
+        if os.path.exists(train_path):
+            train_tensors.append(torch.load(train_path, weights_only=True))
+        if os.path.exists(val_path):
+            val_tensors.append(torch.load(val_path, weights_only=True))
+            
+    if not train_tensors:
+        raise FileNotFoundError("Dataset train.pt tidak ditemukan di kategori yang diminta. Jalankan preprocess.py terlebih dahulu.")
+        
+    # Gabungkan tensor
+    train_data = torch.cat(train_tensors)
+    val_data = torch.cat(val_tensors)
+    
+    train_ds = SentinelDataset(train_data, config.max_position_embeddings)
+    val_ds = SentinelDataset(val_data, config.max_position_embeddings)
+    
+    train_dl = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, drop_last=True)
+    val_dl = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, drop_last=True)
+    
+    return train_dl, val_dl
+
+if __name__ == "__main__":
+    config = load_config("config/tiny.yaml")
+    train_dl, val_dl = get_dataloaders(config)
+    for batch in train_dl:
+        print(f"Input shape: {batch['input_ids'].shape}")
+        print(f"Target shape: {batch['target_ids'].shape}")
+        break

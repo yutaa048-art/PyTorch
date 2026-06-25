@@ -1,0 +1,21 @@
+# Arsitektur Transformer (Sesuai spesifikasi Scaling Law Modern)
+vocab_size: 16000
+hidden_size: 512
+num_hidden_layers: 8
+num_attention_heads: 8
+intermediate_size: 1536 # FFN
+max_position_embeddings: 1024 # Context
+rms_norm_eps: 1.0e-6
+rope_theta: 10000.0
+
+# Training
+batch_size: 16
+learning_rate: 3.0e-4
+weight_decay: 0.01
+max_epochs: 5
+device: "cuda"
+
+# Path
+tokenizer_path: "tokenizer/tokenizer.model"
+data_path: "dataset/samples/corpus_v0.1.txt"
+train_split: 0.9

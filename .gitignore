@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+env.bak/
+venv.bak/
+
+# Project Specific
+dataset/corpus/
+dataset/samples/
+dataset/raw_repos/
+checkpoints/
+experiments/
+evaluation/results/
+kaggle_upload/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
