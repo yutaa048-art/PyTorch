@@ -47,8 +47,14 @@ def get_dataloaders(config):
         if os.path.exists(val_path):
             val_tensors.append(torch.load(val_path, weights_only=True))
             
+    # Fallback: Jika train.pt ada di base_dir (dataset tunggal)
+    if os.path.exists(os.path.join(base_dir, "train.pt")) and not train_tensors:
+        train_tensors.append(torch.load(os.path.join(base_dir, "train.pt"), weights_only=True))
+        if os.path.exists(os.path.join(base_dir, "val.pt")):
+            val_tensors.append(torch.load(os.path.join(base_dir, "val.pt"), weights_only=True))
+            
     if not train_tensors:
-        raise FileNotFoundError("Dataset train.pt tidak ditemukan di kategori yang diminta. Jalankan preprocess.py terlebih dahulu.")
+        raise FileNotFoundError("Dataset train.pt tidak ditemukan di kategori yang diminta maupun di base directory. Jalankan preprocess.py terlebih dahulu.")
         
     # Gabungkan tensor
     train_data = torch.cat(train_tensors)
