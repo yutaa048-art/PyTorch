@@ -65,7 +65,9 @@ def train(config_path="config/small.yaml"):
         checkpoint = torch.load(save_path, map_location=device, weights_only=True)
         
         if 'model' in checkpoint and 'optimizer' in checkpoint:
-            model.load_state_dict(checkpoint['model'])
+            state_dict = checkpoint['model']
+            clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+            model.load_state_dict(clean_state_dict)
             optimizer.load_state_dict(checkpoint['optimizer'])
             
             if 'scaler' in checkpoint and checkpoint['scaler'] is not None and scaler is not None:
@@ -77,7 +79,8 @@ def train(config_path="config/small.yaml"):
             if 'step_in_epoch' in checkpoint:
                 start_step = checkpoint['step_in_epoch'] + 1
         else:
-            model.load_state_dict(checkpoint)
+            clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in checkpoint.items()}
+            model.load_state_dict(clean_state_dict)
             
         logger.info(f"Berhasil resume dari Epoch {start_epoch + 1}, Step {start_step}")
         
@@ -98,6 +101,10 @@ def train(config_path="config/small.yaml"):
         csv_file = open(os.path.join(exp_dir, "loss.csv"), "w", newline="")
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(["epoch", "step", "train_loss", "lr"])
+        
+    if torch.cuda.device_count() > 1:
+        logger.info(f"Menggunakan {torch.cuda.device_count()} GPUs dengan DataParallel")
+        model = torch.nn.DataParallel(model)
     
     for epoch in range(start_epoch, config.max_epochs):
         model.train()
@@ -156,8 +163,9 @@ def train(config_path="config/small.yaml"):
                 
                 # Simpan checkpoint sementara tiap 500 step
                 if (step + 1) % 500 == 0:
+                    model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else model
                     torch.save({
-                        'model': model.state_dict(),
+                        'model': model_to_save.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'scaler': scaler.state_dict() if scaler else None,
                         'scheduler': scheduler.state_dict(),
@@ -172,13 +180,15 @@ def train(config_path="config/small.yaml"):
         
     csv_file.close()
     
+    model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else model
+    
     # Simpan model final di folder eksperimen
     final_model_path = os.path.join(exp_dir, "model.pt")
-    torch.save(model.state_dict(), final_model_path)
+    torch.save(model_to_save.state_dict(), final_model_path)
     
     # Update latest.pt 
     torch.save({
-        'model': model.state_dict(),
+        'model': model_to_save.state_dict(),
         'optimizer': optimizer.state_dict()
     }, "checkpoints/latest.pt")
     
