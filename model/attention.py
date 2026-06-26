@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.backends.cuda
 
 from .rope import apply_rotary_emb
 
@@ -40,16 +41,29 @@ class Attention(nn.Module):
         xv = xv.transpose(1, 2)
         
         if output_attentions:
-            # Hitung atensi secara manual untuk mengekstrak heatmap
+            # Path manual hanya untuk visualisasi heatmap (tidak digunakan saat training)
             scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
-            # Causal mask
+            # Causal mask: agar token tidak melihat ke depan
             mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device)).view(1, 1, seq_len, seq_len)
             scores = scores.masked_fill(mask == 0, float('-inf'))
-            attn_weights = F.softmax(scores, dim=-1)
+            attn_weights = F.softmax(scores.float(), dim=-1).to(xq.dtype)
             output = torch.matmul(attn_weights, xv)
         else:
-            # Causal mask diimplementasikan secara implisit menggunakan is_causal=True di F.scaled_dot_product_attention
-            output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+            # FlashAttention via SDPA: O(N) memory, 2-4x lebih cepat di T4
+            # enable_flash=True  → pakai FlashAttention kernel jika didukung
+            # enable_mem_efficient=True → fallback ke mem-efficient kernel (T4 support)
+            # is_causal=True     → causal mask otomatis tanpa alokasi matriks N×N
+            with torch.backends.cuda.sdp_kernel(
+                enable_flash=True,
+                enable_math=True,   # fallback ke math jika GPU tidak support flash
+                enable_mem_efficient=True
+            ):
+                output = F.scaled_dot_product_attention(
+                    xq, xk, xv,
+                    attn_mask=None,
+                    dropout_p=0.0,
+                    is_causal=True
+                )
             attn_weights = None
             
         # Kembalikan dimensi awal

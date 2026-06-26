@@ -74,6 +74,11 @@ def train(config_path="config/small.yaml", resume_path=""):
     warmup_steps = int(total_steps * 0.05)
     scheduler = CosineLRScheduler(optimizer, warmup_steps, total_steps)
     
+    # Gradient Accumulation: effective batch = batch_size * accumulation_steps
+    # Contoh: batch_size=16, accumulation_steps=4 → effective batch_size=64
+    accumulation_steps = getattr(config, 'accumulation_steps', 4)
+    logger.info(f"Gradient Accumulation: {accumulation_steps} steps (effective batch_size={config.batch_size * accumulation_steps})")
+    
     start_epoch = 0
     start_step = 0
     save_path = resume_path if resume_path else "checkpoints/latest.pt"
@@ -149,6 +154,8 @@ def train(config_path="config/small.yaml", resume_path=""):
                     next(train_iter)
                 progress.update(task, advance=start_step)
             
+            optimizer.zero_grad()  # Reset gradient di awal setiap epoch
+            
             for step_idx in range(start_step if epoch == start_epoch else 0, len(train_dl)):
                 try:
                     batch = next(train_iter)
@@ -156,33 +163,43 @@ def train(config_path="config/small.yaml", resume_path=""):
                     break
                 
                 step = step_idx
-                x = batch["input_ids"].to(device)
-                y = batch["target_ids"].to(device)
-                
-                optimizer.zero_grad()
+                x = batch["input_ids"].to(device, non_blocking=True)
+                y = batch["target_ids"].to(device, non_blocking=True)
+
                 
                 # AMP Autocast
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
                     logits = model(x)
                     loss = calculate_loss(logits, y)
+                    # Bagi loss agar rata-rata gradien akumulasi tetap setara 1 batch
+                    loss = loss / accumulation_steps
                 
                 if scaler is not None:
                     scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
                 else:
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
                 
-                lr = scheduler.step()
-                total_loss += loss.item()
+                # Lakukan optimizer step hanya tiap accumulation_steps
+                is_accumulation_step = (step + 1) % accumulation_steps == 0 or (step + 1) == len(train_dl)
+                if is_accumulation_step:
+                    if scaler is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        optimizer.step()
+                    lr = scheduler.step()
+                    optimizer.zero_grad()
                 
-                csv_writer.writerow([epoch+1, step+1, loss.item(), lr])
+                # Loss yang dicatat adalah nilai sebelum dibagi (skala penuh)
+                raw_loss = loss.item() * accumulation_steps
+                total_loss += raw_loss
                 
-                progress.update(task, advance=1, info=f"Loss: {loss.item():.4f} | LR: {lr:.2e}")
+                csv_writer.writerow([epoch+1, step+1, raw_loss, lr])
+                
+                progress.update(task, advance=1, info=f"Loss: {raw_loss:.4f} | LR: {lr:.2e}")
                 
                 # Simpan checkpoint sementara tiap 500 step
                 if (step + 1) % 500 == 0:
@@ -222,15 +239,20 @@ def train(config_path="config/small.yaml", resume_path=""):
             writer.add_scalar("Perplexity/Validation", val_perplexity, epoch)
         writer.add_scalar("Perplexity/Train", train_perplexity, epoch)
         
-        # Sample Generation
+        # Sample Generation + bersihkan VRAM setelahnya
         model_to_eval = model.module if isinstance(model, torch.nn.DataParallel) else model
         sample_prompt = "def scan_port("
         try:
             logger.info("  Sample Generation:")
-            generated = generate_text(sample_prompt, config, model_to_eval, device, max_new_tokens=30)
+            with torch.no_grad():
+                generated = generate_text(sample_prompt, config, model_to_eval, device, max_new_tokens=30)
             logger.info(f"    {generated.replace(chr(10), ' ')}")
         except Exception as e:
             logger.error(f"    Gagal melakukan sample generation: {e}")
+        finally:
+            # Bersihkan memori sisa generation sebelum epoch berikutnya
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
             
         # Checkpoint Best & Early Stopping (hanya jika val_loss valid)
         if not _math.isnan(val_loss):

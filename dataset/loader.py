@@ -71,13 +71,33 @@ def get_dataloaders(config):
         )
     
     # drop_last=False agar dataset kecil (lokal/dummy) tidak menghasilkan 0 samples
-    train_dl = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, drop_last=False)
+    # pin_memory=True  : Mengunci halaman RAM agar transfer ke GPU lebih cepat (zero-copy DMA)
+    # num_workers=4    : Prefetch data di 4 proses CPU paralel agar GPU tidak menunggu
+    is_main_process = True  # Bisa diubah ke False jika menggunakan multi-processing trainer
+    num_workers = 4 if is_main_process else 0
+    train_dl = DataLoader(
+        train_ds, 
+        batch_size=config.batch_size, 
+        shuffle=True, 
+        drop_last=False,
+        pin_memory=True,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0)  # Hindari spawn ulang worker tiap epoch
+    )
     
     if val_tensors:
         val_data = torch.cat(val_tensors)
         val_ds = SentinelDataset(val_data, config.max_position_embeddings)
         if len(val_ds) > 0:
-            val_dl = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, drop_last=False)
+            val_dl = DataLoader(
+                val_ds, 
+                batch_size=config.batch_size, 
+                shuffle=False, 
+                drop_last=False,
+                pin_memory=True,
+                num_workers=num_workers,
+                persistent_workers=(num_workers > 0)
+            )
         else:
             logger.warning(f"Val dataset hanya {len(val_data)} token (terlalu kecil untuk seq_len={config.max_position_embeddings}). Validation dinonaktifkan.")
             val_dl = None
