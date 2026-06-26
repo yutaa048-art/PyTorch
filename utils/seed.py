@@ -16,6 +16,8 @@ def set_seed(seed: int = 42):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         
-    # Set backend CUDNN menjadi deterministic
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    # FIX: cudnn.deterministic=True konflik dengan FlashAttention (non-deterministic kernel)
+    # dan mematikan cudnn.benchmark yang penting untuk optimasi kecepatan kernel.
+    # Untuk training LLM, reprodusibilitas cukup dijamin oleh seed Torch saja.
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True  # Biarkan CUDA memilih kernel tercepat otomatis

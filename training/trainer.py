@@ -79,6 +79,10 @@ def train(config_path="config/small.yaml", resume_path=""):
     accumulation_steps = getattr(config, 'accumulation_steps', 4)
     logger.info(f"Gradient Accumulation: {accumulation_steps} steps (effective batch_size={config.batch_size * accumulation_steps})")
     
+    # FIX: inisialisasi lr sebelum training loop agar tidak NameError di step 0-2
+    # (sebelum accumulation step pertama terpenuhi)
+    lr = config.learning_rate
+    
     start_epoch = 0
     start_step = 0
     save_path = resume_path if resume_path else "checkpoints/latest.pt"
@@ -165,7 +169,6 @@ def train(config_path="config/small.yaml", resume_path=""):
                 step = step_idx
                 x = batch["input_ids"].to(device, non_blocking=True)
                 y = batch["target_ids"].to(device, non_blocking=True)
-
                 
                 # AMP Autocast
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
@@ -250,6 +253,8 @@ def train(config_path="config/small.yaml", resume_path=""):
         except Exception as e:
             logger.error(f"    Gagal melakukan sample generation: {e}")
         finally:
+            # FIX: kembalikan model ke train mode setelah generate_text memanggil model.eval()
+            model.train()
             # Bersihkan memori sisa generation sebelum epoch berikutnya
             if device.type == 'cuda':
                 torch.cuda.empty_cache()
