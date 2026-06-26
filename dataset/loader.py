@@ -15,11 +15,13 @@ class SentinelDataset(Dataset):
         self.seq_len = seq_len
         
     def __len__(self):
-        return len(self.data) - self.seq_len
+        # Gunakan non-overlapping chunks (stride = seq_len)
+        return len(self.data) // self.seq_len
         
     def __getitem__(self, idx):
-        x = self.data[idx : idx + self.seq_len]
-        y = self.data[idx + 1 : idx + self.seq_len + 1]
+        start_idx = idx * self.seq_len
+        x = self.data[start_idx : start_idx + self.seq_len]
+        y = self.data[start_idx + 1 : start_idx + self.seq_len + 1]
         
         return {
             "input_ids": x,
