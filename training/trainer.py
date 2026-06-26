@@ -1,9 +1,9 @@
 import os
 import csv
+import math
 import yaml
 import torch
 import glob
-import math
 from datetime import datetime
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
 from torch.utils.tensorboard import SummaryWriter
@@ -215,6 +215,8 @@ def train(config_path="config/small.yaml", resume_path=""):
                         'epoch': epoch,
                         'step_in_epoch': step
                     }, "checkpoints/latest.pt")
+                    # Flush CSV agar data tidak hilang jika Kaggle crash
+                    csv_file.flush()
                     
         denominator = len(train_dl) - (start_step if epoch == start_epoch else 0)
         avg_loss = total_loss / denominator if denominator > 0 else 0.0
@@ -222,22 +224,26 @@ def train(config_path="config/small.yaml", resume_path=""):
         
         # Validation & Metrics
         val_loss = validate(model, val_dl, device)
-        import math as _math
-        train_perplexity = _math.exp(avg_loss) if avg_loss < 50 else float('inf')
-        val_perplexity = _math.exp(val_loss) if (val_loss and not _math.isnan(val_loss) and val_loss < 50) else float('nan')
+        train_perplexity = math.exp(avg_loss) if avg_loss < 50 else float('inf')
+        val_perplexity = math.exp(val_loss) if (val_loss and not math.isnan(val_loss) and val_loss < 50) else float('nan')
         gpu_mem = torch.cuda.memory_reserved(device) / (1024**3) if device.type == 'cuda' else 0.0
+        
+        # Deteksi NaN loss: jika avg_loss NaN, scaler mungkin sudah skip semua update
+        if math.isnan(avg_loss) or math.isinf(avg_loss):
+            logger.error(f"  FATAL: avg_loss={avg_loss:.4f} - training tidak stabil! Cek data dan learning rate.")
+            break
         
         # Logging
         logger.info(f"Epoch {epoch+1}/{config.max_epochs} Selesai")
         logger.info(f"  Train Loss: {avg_loss:.4f} | Train PPL: {train_perplexity:.2f}")
-        if not _math.isnan(val_loss):
+        if not math.isnan(val_loss):
             logger.info(f"  Val Loss:   {val_loss:.4f} | Val PPL:   {val_perplexity:.2f}")
         else:
             logger.info(f"  Val Loss:   N/A (val dataset terlalu kecil)")
         logger.info(f"  GPU Mem:    {gpu_mem:.2f} GB | LR: {lr:.2e}")
         
         writer.add_scalar("Loss/Train", avg_loss, epoch)
-        if not _math.isnan(val_loss):
+        if not math.isnan(val_loss):
             writer.add_scalar("Loss/Validation", val_loss, epoch)
             writer.add_scalar("Perplexity/Validation", val_perplexity, epoch)
         writer.add_scalar("Perplexity/Train", train_perplexity, epoch)
@@ -260,7 +266,7 @@ def train(config_path="config/small.yaml", resume_path=""):
                 torch.cuda.empty_cache()
             
         # Checkpoint Best & Early Stopping (hanya jika val_loss valid)
-        if not _math.isnan(val_loss):
+        if not math.isnan(val_loss):
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
