@@ -60,13 +60,29 @@ def get_dataloaders(config):
         
     # Gabungkan tensor
     train_data = torch.cat(train_tensors)
-    val_data = torch.cat(val_tensors)
     
     train_ds = SentinelDataset(train_data, config.max_position_embeddings)
-    val_ds = SentinelDataset(val_data, config.max_position_embeddings)
     
-    train_dl = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, drop_last=True)
-    val_dl = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, drop_last=True)
+    if len(train_ds) == 0:
+        raise ValueError(
+            f"Dataset training kosong! Data hanya {len(train_data)} token, "
+            f"tetapi seq_len={config.max_position_embeddings}. "
+            f"Pastikan sudah menjalankan preprocess.py dengan dataset yang cukup besar."
+        )
+    
+    # drop_last=False agar dataset kecil (lokal/dummy) tidak menghasilkan 0 samples
+    train_dl = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, drop_last=False)
+    
+    if val_tensors:
+        val_data = torch.cat(val_tensors)
+        val_ds = SentinelDataset(val_data, config.max_position_embeddings)
+        if len(val_ds) > 0:
+            val_dl = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, drop_last=False)
+        else:
+            logger.warning(f"Val dataset hanya {len(val_data)} token (terlalu kecil untuk seq_len={config.max_position_embeddings}). Validation dinonaktifkan.")
+            val_dl = None
+    else:
+        val_dl = None
     
     return train_dl, val_dl
 

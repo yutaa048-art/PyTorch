@@ -41,6 +41,8 @@ def setup_experiment(config):
 
 @torch.no_grad()
 def validate(model, val_dl, device):
+    if val_dl is None or len(val_dl) == 0:
+        return float('nan')
     model.eval()
     total_loss = 0.0
     for batch in val_dl:
@@ -50,7 +52,7 @@ def validate(model, val_dl, device):
             logits = model(x)
             loss = calculate_loss(logits, y)
         total_loss += loss.item()
-    return total_loss / len(val_dl) if len(val_dl) > 0 else 0.0
+    return total_loss / len(val_dl)
 
 def train(config_path="config/small.yaml", resume_path=""):
     config = load_config(config_path)
@@ -200,20 +202,25 @@ def train(config_path="config/small.yaml", resume_path=""):
         
         # Validation & Metrics
         val_loss = validate(model, val_dl, device)
-        train_perplexity = math.exp(avg_loss) if avg_loss < 50 else float('inf')
-        val_perplexity = math.exp(val_loss) if val_loss < 50 else float('inf')
+        import math as _math
+        train_perplexity = _math.exp(avg_loss) if avg_loss < 50 else float('inf')
+        val_perplexity = _math.exp(val_loss) if (val_loss and not _math.isnan(val_loss) and val_loss < 50) else float('nan')
         gpu_mem = torch.cuda.memory_reserved(device) / (1024**3) if device.type == 'cuda' else 0.0
         
         # Logging
         logger.info(f"Epoch {epoch+1}/{config.max_epochs} Selesai")
         logger.info(f"  Train Loss: {avg_loss:.4f} | Train PPL: {train_perplexity:.2f}")
-        logger.info(f"  Val Loss:   {val_loss:.4f} | Val PPL:   {val_perplexity:.2f}")
+        if not _math.isnan(val_loss):
+            logger.info(f"  Val Loss:   {val_loss:.4f} | Val PPL:   {val_perplexity:.2f}")
+        else:
+            logger.info(f"  Val Loss:   N/A (val dataset terlalu kecil)")
         logger.info(f"  GPU Mem:    {gpu_mem:.2f} GB | LR: {lr:.2e}")
         
         writer.add_scalar("Loss/Train", avg_loss, epoch)
-        writer.add_scalar("Loss/Validation", val_loss, epoch)
+        if not _math.isnan(val_loss):
+            writer.add_scalar("Loss/Validation", val_loss, epoch)
+            writer.add_scalar("Perplexity/Validation", val_perplexity, epoch)
         writer.add_scalar("Perplexity/Train", train_perplexity, epoch)
-        writer.add_scalar("Perplexity/Validation", val_perplexity, epoch)
         
         # Sample Generation
         model_to_eval = model.module if isinstance(model, torch.nn.DataParallel) else model
@@ -225,22 +232,25 @@ def train(config_path="config/small.yaml", resume_path=""):
         except Exception as e:
             logger.error(f"    Gagal melakukan sample generation: {e}")
             
-        # Checkpoint Best & Early Stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save({
-                'model': model_to_eval.state_dict(),
-                'epoch': epoch,
-                'val_loss': val_loss
-            }, "checkpoints/best.pt")
-            logger.info("  ✅ New Best Checkpoint Saved!")
+        # Checkpoint Best & Early Stopping (hanya jika val_loss valid)
+        if not _math.isnan(val_loss):
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                torch.save({
+                    'model': model_to_eval.state_dict(),
+                    'epoch': epoch,
+                    'val_loss': val_loss
+                }, "checkpoints/best.pt")
+                logger.info("  ✅ New Best Checkpoint Saved!")
+            else:
+                patience_counter += 1
+                logger.info(f"  ⚠️ Validation loss tidak membaik. Patience: {patience_counter}/{patience}")
+                if patience_counter >= patience:
+                    logger.info("🛑 Early Stopping triggered! Training dihentikan.")
+                    break
         else:
-            patience_counter += 1
-            logger.info(f"  ⚠️ Validation loss tidak membaik. Patience: {patience_counter}/{patience}")
-            if patience_counter >= patience:
-                logger.info("🛑 Early Stopping triggered! Training dihentikan.")
-                break
+            logger.info("  ⏭️ Melewati Early Stopping (val dataset tidak tersedia)")
         
     csv_file.close()
     writer.close()
