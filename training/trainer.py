@@ -3,8 +3,10 @@ import csv
 import yaml
 import torch
 import glob
+import math
 from datetime import datetime
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
+from torch.utils.tensorboard import SummaryWriter
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,6 +19,7 @@ from model.model import SentinelLM
 from training.loss import calculate_loss
 from training.optimizer import create_optimizer
 from training.scheduler import CosineLRScheduler
+from inference.generate import generate_text
 
 logger = get_logger("Trainer")
 
@@ -36,7 +39,20 @@ def setup_experiment(config):
         
     return exp_dir
 
-def train(config_path="config/small.yaml"):
+@torch.no_grad()
+def validate(model, val_dl, device):
+    model.eval()
+    total_loss = 0.0
+    for batch in val_dl:
+        x = batch["input_ids"].to(device)
+        y = batch["target_ids"].to(device)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
+            logits = model(x)
+            loss = calculate_loss(logits, y)
+        total_loss += loss.item()
+    return total_loss / len(val_dl) if len(val_dl) > 0 else 0.0
+
+def train(config_path="config/small.yaml", resume_path=""):
     config = load_config(config_path)
     set_seed(42)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
@@ -58,7 +74,7 @@ def train(config_path="config/small.yaml"):
     
     start_epoch = 0
     start_step = 0
-    save_path = "checkpoints/latest.pt"
+    save_path = resume_path if resume_path else "checkpoints/latest.pt"
     
     if os.path.exists(save_path):
         logger.info(f"Menemukan checkpoint di {save_path}, mencoba resume...")
@@ -101,6 +117,11 @@ def train(config_path="config/small.yaml"):
         csv_file = open(os.path.join(exp_dir, "loss.csv"), "w", newline="")
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(["epoch", "step", "train_loss", "lr"])
+        
+    writer = SummaryWriter(log_dir=os.path.join(exp_dir, "logs"))
+    best_val_loss = float('inf')
+    patience = 3
+    patience_counter = 0
         
     if torch.cuda.device_count() > 1:
         logger.info(f"Menggunakan {torch.cuda.device_count()} GPUs dengan DataParallel")
@@ -176,9 +197,53 @@ def train(config_path="config/small.yaml"):
         denominator = len(train_dl) - (start_step if epoch == start_epoch else 0)
         avg_loss = total_loss / denominator if denominator > 0 else 0.0
         start_step = 0
-        logger.info(f"Epoch {epoch+1} selesai | Train Loss: {avg_loss:.4f}")
+        
+        # Validation & Metrics
+        val_loss = validate(model, val_dl, device)
+        train_perplexity = math.exp(avg_loss) if avg_loss < 50 else float('inf')
+        val_perplexity = math.exp(val_loss) if val_loss < 50 else float('inf')
+        gpu_mem = torch.cuda.memory_reserved(device) / (1024**3) if device.type == 'cuda' else 0.0
+        
+        # Logging
+        logger.info(f"Epoch {epoch+1}/{config.max_epochs} Selesai")
+        logger.info(f"  Train Loss: {avg_loss:.4f} | Train PPL: {train_perplexity:.2f}")
+        logger.info(f"  Val Loss:   {val_loss:.4f} | Val PPL:   {val_perplexity:.2f}")
+        logger.info(f"  GPU Mem:    {gpu_mem:.2f} GB | LR: {lr:.2e}")
+        
+        writer.add_scalar("Loss/Train", avg_loss, epoch)
+        writer.add_scalar("Loss/Validation", val_loss, epoch)
+        writer.add_scalar("Perplexity/Train", train_perplexity, epoch)
+        writer.add_scalar("Perplexity/Validation", val_perplexity, epoch)
+        
+        # Sample Generation
+        model_to_eval = model.module if isinstance(model, torch.nn.DataParallel) else model
+        sample_prompt = "def scan_port("
+        try:
+            logger.info("  Sample Generation:")
+            generated = generate_text(sample_prompt, config, model_to_eval, device, max_new_tokens=30)
+            logger.info(f"    {generated.replace(chr(10), ' ')}")
+        except Exception as e:
+            logger.error(f"    Gagal melakukan sample generation: {e}")
+            
+        # Checkpoint Best & Early Stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save({
+                'model': model_to_eval.state_dict(),
+                'epoch': epoch,
+                'val_loss': val_loss
+            }, "checkpoints/best.pt")
+            logger.info("  ✅ New Best Checkpoint Saved!")
+        else:
+            patience_counter += 1
+            logger.info(f"  ⚠️ Validation loss tidak membaik. Patience: {patience_counter}/{patience}")
+            if patience_counter >= patience:
+                logger.info("🛑 Early Stopping triggered! Training dihentikan.")
+                break
         
     csv_file.close()
+    writer.close()
     
     model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else model
     
@@ -202,6 +267,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config/small.yaml")
+    parser.add_argument("--resume", type=str, default="", help="Path ke checkpoint untuk resume. Kosongkan untuk auto-resume latest.pt")
     args = parser.parse_args()
     
-    train(args.config)
+    train(args.config, args.resume)
