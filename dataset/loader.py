@@ -52,15 +52,15 @@ def get_dataloaders(config, seq_len_override: int = None):
 
     if data_path.endswith('.bin'):
         meta_path = data_path + ".meta"
-        if not os.path.exists(meta_path):
-            raise FileNotFoundError(
-                f"File meta {meta_path} tidak ditemukan! "
-                "Pastikan Anda sudah menjalankan build_memmap.py"
-            )
-
-        with open(meta_path, 'r') as f:
-            meta = json.load(f)
-            total_tokens = meta['total_tokens']
+        if os.path.exists(meta_path):
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+                total_tokens = meta['total_tokens']
+        else:
+            # Fallback: Hitung jumlah token dari ukuran file (uint16 = 2 bytes)
+            logger.warning(f"File {meta_path} tidak ditemukan. Menghitung token dari ukuran file...")
+            total_bytes = os.path.getsize(data_path)
+            total_tokens = total_bytes // 2
 
         logger.info(f"Memmap Dataset: {data_path} ({total_tokens:,} tokens, seq_len={seq_len})")
 
