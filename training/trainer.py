@@ -292,8 +292,8 @@ def train(config_path="config/small.yaml", resume_path=""):
     os.makedirs("experiments", exist_ok=True)
     exp_dirs = sorted(glob.glob("experiments/exp*"))
     
-    if args.resume:
-        save_path = args.resume
+    if resume_path:
+        save_path = resume_path
         exp_dir = os.path.dirname(os.path.dirname(save_path)) if "checkpoints" in save_path else "experiments/exp_resume"
     else:
         if exp_dirs:
@@ -685,7 +685,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config/small.yaml")
+    parser.add_argument("--resume", type=str, default="", help="Path ke checkpoint untuk resume manual")
     args = parser.parse_args()
     
-    # We no longer need args.resume logic in argparse since it auto-detects from experiments/
-    train(args.config, "")
+    train(args.config, args.resume)
