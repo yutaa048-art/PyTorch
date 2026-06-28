@@ -257,6 +257,7 @@ def train(config_path="config/small.yaml", resume_path=""):
     tokenizer_path = getattr(config, 'tokenizer_path', 'tokenizer/tokenizer.model')
     sp = None
     if os.path.exists(tokenizer_path):
+        import sentencepiece as spm
         sp = spm.SentencePieceProcessor()
         sp.load(tokenizer_path)
         logger.info(f"Tokenizer dimuat: {tokenizer_path} (vocab={sp.get_piece_size()})")
