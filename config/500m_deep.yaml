@@ -1,0 +1,35 @@
+# =============================================================================
+# SentinelLM 500M — Deep Configuration (Optimisasi Reasoning)
+# =============================================================================
+# Total Parameter: ~502M
+# Filosofi: Lebih banyak layer = lebih banyak "langkah berpikir"
+# 32 TransformerBlock = 32 langkah reasoning dalam otak model.
+# Setiap layer ekstra memungkinkan model menyusun abstraksi lebih dalam.
+# Riset Google Brain menunjukkan depth > width untuk penalaran logis.
+# =============================================================================
+
+# Arsitektur
+vocab_size: 32000
+hidden_size: 1024
+num_hidden_layers: 32            # 32 langkah reasoning (4x lipat model 43M!)
+num_attention_heads: 16
+num_key_value_heads: 4         # GQA: 4 KV heads dipakai bersama 16 Q heads
+intermediate_size: 3072          # SwiGLU FFN (3 * hidden_size)
+max_position_embeddings: 2048    # Context window: ~1500 kata / 3-4 halaman kode
+rms_norm_eps: 1.0e-6
+rope_theta: 500000.0             # Dynamic RoPE: 500K lebih stabil untuk konteks panjang
+
+# Training
+batch_size: 4                    # Kecil karena model besar (VRAM terbatas)
+learning_rate: 3.0e-4
+weight_decay: 0.01
+max_epochs: 1                    # 1 epoch = Chinchilla-optimal untuk 10B token
+device: "cuda"
+gradient_accumulation_steps: 16  # Effective batch = 4 * 16 = 64
+layerdrop: 0.02                  # LayerDrop: 2% probabilitas skip per layer (stabil di awal)
+curriculum_start_sl: 512         # Curriculum Context: mulai dari 512, naik ke 1024→2048→4096
+
+# Path
+tokenizer_path: "tokenizer/tokenizer_32k.model"
+data_path: "/home/yuta/RIset Corpus/Sentinel_Corpus/corpus.bin" # Gunakan .bin untuk Memmap Dataset
+train_split: 0.95
