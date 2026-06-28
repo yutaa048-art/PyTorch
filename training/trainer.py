@@ -310,7 +310,9 @@ def train(config_path="config/small.yaml", resume_path=""):
         model = torch.nn.DataParallel(model)
 
     start_time = time.time()
-    total_tokens_processed = 0
+    
+    # Kalkulasi ulang total token yang sudah diproses berdasarkan global_step (sangat penting untuk akurasi ETA saat resume)
+    total_tokens_processed = sum(curriculum.get_seq_len(i) * config.batch_size for i in range(global_step))
     total_tokens_target = sum(curriculum.get_seq_len(i) * config.batch_size for i in range(total_steps))
 
     ema_lm_loss = 0.0
