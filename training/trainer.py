@@ -30,7 +30,6 @@ from training.loss import calculate_loss, calculate_loss_unreduced
 from training.optimizer import create_optimizer
 from training.scheduler import CosineLRScheduler
 from inference.generate import generate_text
-import sentencepiece as spm
 
 logger = get_logger("Trainer")
 console = Console()
@@ -56,12 +55,13 @@ class CurriculumScheduler:
         self.current_seq_len = self.PHASES[0][1]
 
     def get_seq_len(self, global_step: int) -> int:
+        """Mengembalikan seq_len yang tepat. Menggunakan reversed agar berhenti
+        di threshold pertama yang terpenuhi dari atas (deterministik)."""
         progress = global_step / max(1, self.total_steps)
-        seq_len = self.PHASES[0][1]
-        for threshold, sl in self.PHASES:
+        for threshold, sl in reversed(self.PHASES):
             if progress >= threshold:
-                seq_len = sl
-        return seq_len
+                return sl
+        return self.PHASES[0][1]
 
     def step(self, global_step: int) -> tuple[int, bool]:
         """Mengembalikan (seq_len, changed) — apakah seq_len berubah."""
@@ -273,12 +273,14 @@ def train(config_path="config/small.yaml", resume_path=""):
 
     optimizer = create_optimizer(model, config.learning_rate, config.weight_decay)
 
-    total_steps = len(train_dl) * config.max_epochs
-    warmup_steps = int(total_steps * 0.05)
-    scheduler = CosineLRScheduler(optimizer, warmup_steps, total_steps)
-
+    total_batches = len(train_dl) * config.max_epochs
     accumulation_steps = getattr(config, 'accumulation_steps', 4)
     logger.info(f"Gradient Accumulation: {accumulation_steps} steps")
+
+    # Safeguard: pastikan total_steps tidak pernah nol agar scheduler tidak error
+    total_steps = max(1, total_batches // accumulation_steps)
+    warmup_steps = int(total_steps * 0.05)
+    scheduler = CosineLRScheduler(optimizer, warmup_steps, total_steps)
 
     krb = KnowledgeReplayBuffer(max_per_slot=200)
     curriculum = CurriculumScheduler(total_steps)
@@ -348,10 +350,20 @@ def train(config_path="config/small.yaml", resume_path=""):
         model = torch.nn.DataParallel(model)
 
     start_time = time.time()
-    
-    # Kalkulasi ulang total token yang sudah diproses berdasarkan global_step (sangat penting untuk akurasi ETA saat resume)
-    total_tokens_processed = sum(curriculum.get_seq_len(i) * config.batch_size for i in range(global_step))
-    total_tokens_target = sum(curriculum.get_seq_len(i) * config.batch_size for i in range(total_steps))
+
+    # Hitung gpu_count sekali saja agar konsisten antara total_tokens_processed
+    # dan total_tokens_target, serta tidak ada overhead device query di dalam loop.
+    gpu_count = max(1, torch.cuda.device_count())
+    tokens_per_global_step = config.batch_size * accumulation_steps * gpu_count
+
+    # Kalkulasi ulang total token yang sudah diproses berdasarkan global_step
+    # (sangat penting untuk akurasi ETA saat resume)
+    total_tokens_processed = sum(
+        curriculum.get_seq_len(i) * tokens_per_global_step for i in range(global_step)
+    )
+    total_tokens_target = sum(
+        curriculum.get_seq_len(i) * tokens_per_global_step for i in range(total_steps)
+    )
 
     ema_lm_loss = 0.0
     ema_head_losses = defaultdict(float)
@@ -407,7 +419,9 @@ def train(config_path="config/small.yaml", resume_path=""):
                 x = batch["input_ids"].to(device, non_blocking=True)
                 y = batch["target_ids"].to(device, non_blocking=True)
 
-                batch_tokens = config.batch_size * curriculum.current_seq_len
+                # Gunakan tokens_per_global_step yang sudah dihitung di awal
+                # agar konsisten dengan target token dan tidak ada duplikasi hitungan.
+                batch_tokens = curriculum.current_seq_len * tokens_per_global_step
                 total_tokens_processed += batch_tokens
                 last_500_tokens += batch_tokens
                 total_sequences_seen += config.batch_size
@@ -415,6 +429,8 @@ def train(config_path="config/small.yaml", resume_path=""):
                 is_replay_step = False
                 if step > 0 and step % 50 == 0:
                     replay_out = krb.sample_batch(config.batch_size, device)
+                    # Perbaikan: selalu periksa None sebelum unpack
+                    # agar tidak terjadi TypeError saat buffer belum penuh
                     if replay_out is not None:
                         is_replay_step = True
                         x, y, h_cnt, t_cnt = replay_out
@@ -477,18 +493,31 @@ def train(config_path="config/small.yaml", resume_path=""):
 
                 is_accumulation_step = (step + 1) % accumulation_steps == 0 or (step + 1) == len(train_dl)
                 if is_accumulation_step:
+                    step_skipped = False  # Apakah optimizer.step diblokir karena overflow?
                     if scaler is not None:
                         scaler.unscale_(optimizer)
-                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0).item()
+                        # grad_norm_raw: nilai asli dari clip_grad_norm,
+                        # bisa inf jika terjadi overflow FP16.
+                        # Nilai ini TIDAK boleh dimodifikasi agar informasi overflow tidak hilang.
+                        grad_norm_raw = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0).item()
+                        scale_before = scaler.get_scale()
                         scaler.step(optimizer)
                         scaler.update()
                         grad_scale = scaler.get_scale()
+                        # Jika scale turun, scaler mendeteksi overflow dan memblokir optimizer.step.
+                        # Kita tandai sebagai skipped agar EMA tidak diperbarui dengan nilai tidak valid,
+                        # tetapi kita TETAP menyimpan grad_norm_raw aslinya untuk keperluan logging.
+                        if grad_scale < scale_before:
+                            step_skipped = True
                     else:
-                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0).item()
+                        grad_norm_raw = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0).item()
                         optimizer.step()
                         grad_scale = 1.0
-                        
-                    ema_grad_norm = 0.9 * ema_grad_norm + 0.1 * grad_norm if ema_grad_norm > 0 else grad_norm
+
+                    # EMA hanya diperbarui pada step yang TIDAK diblokir dan nilainya finite.
+                    # Ini memastikan EMA selalu mencerminkan gradien yang benar-benar diterapkan ke model.
+                    if not step_skipped and not math.isinf(grad_norm_raw) and not math.isnan(grad_norm_raw):
+                        ema_grad_norm = 0.9 * ema_grad_norm + 0.1 * grad_norm_raw if ema_grad_norm > 0 else grad_norm_raw
                     lr = scheduler.step()
                     optimizer.zero_grad()
 
@@ -545,7 +574,15 @@ def train(config_path="config/small.yaml", resume_path=""):
                             table.add_row(f"Loss {k.capitalize()}", f"{ema_head_losses[k]:.4f} | Acc: {acc*100:.1f}% | Conf: {ema_head_confs[k]:.2f}")
                             table.add_row(f"Health {k.capitalize()}", f"[green]{bars}[/green] {acc*100:.1f}%")
                             
-                    table.add_row("Gradient Norm", f"{ema_grad_norm:.4f} (Scale: {grad_scale})")
+                    # Tampilkan EMA grad_norm (nilai yang benar-benar diterapkan ke model)
+                    # dan tunjukkan nilai raw serta status SKIP pada step terakhir untuk transparansi.
+                    if step_skipped:
+                        grad_norm_display = f"{ema_grad_norm:.4f} (EMA) | Raw: {grad_norm_raw:.4f} [SKIP-overflow] (Scale: {grad_scale})"
+                    elif math.isinf(grad_norm_raw) or math.isnan(grad_norm_raw):
+                        grad_norm_display = f"{ema_grad_norm:.4f} (EMA) | Raw: {grad_norm_raw} (Scale: {grad_scale})"
+                    else:
+                        grad_norm_display = f"{ema_grad_norm:.4f} (Scale: {grad_scale})"
+                    table.add_row("Gradient Norm", grad_norm_display)
                     table.add_row("Learning Rate", f"{lr:.2e}")
                     table.add_row("KRB Size", str(krb_size))
                     table.add_row("Replay Hit Rate", f"Hard: {hard_hit_rate:.1f}% | Topic: {topic_hit_rate:.1f}%")
@@ -668,11 +705,19 @@ def train(config_path="config/small.yaml", resume_path=""):
 
     model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else model
     final_model_path = os.path.join(exp_dir, "checkpoints", "model_final.pt")
+    # Simpan hanya weights murni untuk inferensi
     torch.save(model_to_save.state_dict(), final_model_path)
 
+    # Perbaikan: simpan state lengkap di latest.pt akhir agar bisa di-resume
+    # dengan benar jika training dilanjutkan dari titik ini
     torch.save({
         'model': model_to_save.state_dict(),
-        'optimizer': optimizer.state_dict()
+        'optimizer': optimizer.state_dict(),
+        'scaler': scaler.state_dict() if scaler else None,
+        'scheduler': scheduler.state_dict(),
+        'epoch': config.max_epochs - 1,
+        'step_in_epoch': len(train_dl) - 1,
+        'global_step': global_step,
     }, os.path.join(exp_dir, "checkpoints", "latest.pt"))
 
     with open(os.path.join(exp_dir, "notes.md"), "a") as f:
