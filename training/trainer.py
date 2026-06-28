@@ -192,13 +192,39 @@ def compute_combined_loss(
 
 def setup_experiment(config):
     os.makedirs("experiments", exist_ok=True)
-    os.makedirs("checkpoints", exist_ok=True)
-    exp_dirs = glob.glob("experiments/exp*")
+    exp_dirs = sorted(glob.glob("experiments/exp*"))
     exp_id = len(exp_dirs) + 1
     exp_dir = f"experiments/exp{exp_id:03d}"
+    
     os.makedirs(exp_dir, exist_ok=True)
+    os.makedirs(os.path.join(exp_dir, "tensorboard"), exist_ok=True)
+    os.makedirs(os.path.join(exp_dir, "checkpoints"), exist_ok=True)
+    
     with open(os.path.join(exp_dir, "config.yaml"), "w") as f:
         yaml.dump(vars(config), f)
+        
+    try:
+        import subprocess
+        git_commit = subprocess.getoutput("git rev-parse HEAD").strip()
+    except Exception:
+        git_commit = "Unknown"
+        
+    notes_content = f"""# Experiment {exp_id:03d}
+
+**Git Commit:** `{git_commit}`
+**Corpus Path:** `{getattr(config, 'data_path', 'Unknown')}`
+
+## Konfigurasi Utama
+```yaml
+{yaml.dump(vars(config))}
+```
+
+## Perubahan dibanding eksperimen sebelumnya:
+- (Tulis perubahan di sini)
+"""
+    with open(os.path.join(exp_dir, "notes.md"), "w") as f:
+        f.write(notes_content)
+        
     return exp_dir
 
 
@@ -261,9 +287,23 @@ def train(config_path="config/small.yaml", resume_path=""):
     global_step = 0
     start_epoch = 0
     start_step = 0
-    save_path = resume_path if resume_path else "checkpoints/latest.pt"
+    
+    # Deteksi eksperimen terakhir
+    os.makedirs("experiments", exist_ok=True)
+    exp_dirs = sorted(glob.glob("experiments/exp*"))
+    
+    if args.resume:
+        save_path = args.resume
+        exp_dir = os.path.dirname(os.path.dirname(save_path)) if "checkpoints" in save_path else "experiments/exp_resume"
+    else:
+        if exp_dirs:
+            exp_dir = exp_dirs[-1]
+            save_path = os.path.join(exp_dir, "checkpoints", "latest.pt")
+        else:
+            exp_dir = ""
+            save_path = ""
 
-    if os.path.exists(save_path):
+    if save_path and os.path.exists(save_path):
         logger.info(f"Menemukan checkpoint di {save_path}, mencoba resume...")
         checkpoint = torch.load(save_path, map_location=device, weights_only=True)
 
@@ -287,20 +327,18 @@ def train(config_path="config/small.yaml", resume_path=""):
             model.load_state_dict(clean_state_dict)
 
         logger.info(f"Berhasil resume dari Epoch {start_epoch + 1}, Step {start_step}")
-        exp_dirs = sorted(glob.glob("experiments/exp*"))
-        exp_dir = exp_dirs[-1] if exp_dirs else setup_experiment(config)
         csv_file = open(os.path.join(exp_dir, "loss.csv"), "a", newline="")
         csv_writer = csv.writer(csv_file)
         jsonl_file = open(os.path.join(exp_dir, "metrics.jsonl"), "a")
     else:
         exp_dir = setup_experiment(config)
-        logger.info(f"Eksperimen dimulai. Log tersimpan di {exp_dir}")
+        logger.info(f"Eksperimen dimulai. Output tersimpan di {exp_dir}")
         csv_file = open(os.path.join(exp_dir, "loss.csv"), "w", newline="")
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(["epoch", "step", "train_loss", "lr", "seq_len"])
         jsonl_file = open(os.path.join(exp_dir, "metrics.jsonl"), "w")
 
-    writer = SummaryWriter(log_dir=os.path.join(exp_dir, "logs"))
+    writer = SummaryWriter(log_dir=os.path.join(exp_dir, "tensorboard"))
     best_val_loss = float('inf')
     patience = 3
     patience_counter = 0
@@ -556,7 +594,7 @@ def train(config_path="config/small.yaml", resume_path=""):
                         'epoch': epoch,
                         'step_in_epoch': step,
                         'global_step': global_step,
-                    }, "checkpoints/latest.pt")
+                    }, os.path.join(exp_dir, "checkpoints", "latest.pt"))
                     csv_file.flush()
 
                     krb_stats = krb.stats()
@@ -613,7 +651,7 @@ def train(config_path="config/small.yaml", resume_path=""):
                     'model': model_to_eval.state_dict(),
                     'epoch': epoch,
                     'val_loss': val_loss
-                }, "checkpoints/best.pt")
+                }, os.path.join(exp_dir, "checkpoints", "best.pt"))
                 logger.info("  ✅ New Best Checkpoint Saved!")
             else:
                 patience_counter += 1
@@ -629,16 +667,16 @@ def train(config_path="config/small.yaml", resume_path=""):
     writer.close()
 
     model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else model
-    final_model_path = os.path.join(exp_dir, "model.pt")
+    final_model_path = os.path.join(exp_dir, "checkpoints", "model_final.pt")
     torch.save(model_to_save.state_dict(), final_model_path)
 
     torch.save({
         'model': model_to_save.state_dict(),
         'optimizer': optimizer.state_dict()
-    }, "checkpoints/latest.pt")
+    }, os.path.join(exp_dir, "checkpoints", "latest.pt"))
 
-    with open(os.path.join(exp_dir, "notes.md"), "w") as f:
-        f.write(f"# Eksperimen Selesai\n- Waktu: {datetime.now()}\n- Final Train Loss: {avg_loss:.4f}\n")
+    with open(os.path.join(exp_dir, "notes.md"), "a") as f:
+        f.write(f"\n\n## Hasil Akhir\n- Waktu Selesai: {datetime.now()}\n- Final Train Loss: {avg_loss:.4f}\n")
         f.write(f"- KRB Final Stats: {krb.stats()}\n")
 
     logger.info(f"Model final tersimpan di {final_model_path}")
@@ -647,6 +685,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config/small.yaml")
-    parser.add_argument("--resume", type=str, default="", help="Path ke checkpoint untuk resume")
     args = parser.parse_args()
-    train(args.config, args.resume)
+    
+    # We no longer need args.resume logic in argparse since it auto-detects from experiments/
+    train(args.config, "")
